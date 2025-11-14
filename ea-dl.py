@@ -9,8 +9,10 @@ for each grid square that intersects the AOI.
 import argparse
 import sys
 from collections import defaultdict
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List
+from zipfile import ZipFile
 
 import geopandas as gp
 import httpx
@@ -124,6 +126,7 @@ def download_tile(
     resolution: str,
     product: str,
     dry_run: bool = False,
+    extract: bool = False,
 ) -> bool:
     """
     Download a single LIDAR tile from a given URL.
@@ -136,6 +139,7 @@ def download_tile(
         resolution: Resolution in meters
         product: Product type (e.g., 'lidar_composite_dtm')
         dry_run: If True, only print what would be downloaded
+        extract: If True, extract zip contents instead of saving zip file
 
     Returns:
         True if successful, False otherwise
@@ -148,16 +152,21 @@ def download_tile(
     product_dir = output_dir / product / year / f"{resolution}m"
     product_dir.mkdir(parents=True, exist_ok=True)
 
-    output_file = product_dir / f"{tile_name}.zip"
-
     if dry_run:
-        print(f"Would download: {url}")
-        print(f"         to: {output_file}")
+        action = "extract" if extract else "download"
+        print(f"Would {action}: {url}")
+        print(f"            to: {product_dir}")
         return True
 
-    if output_file.exists():
-        print(f"Skipping {tile_name} - already exists")
-        return True
+    # Check if output already exists
+    if extract:
+        # For extraction, we can't easily check all potential files, so skip this check
+        pass
+    else:
+        output_file = product_dir / f"{tile_name}.zip"
+        if output_file.exists():
+            print(f"Skipping {tile_name} - already exists")
+            return True
 
     try:
         with httpx.Client(timeout=300.0, follow_redirects=True) as client:
@@ -176,15 +185,39 @@ def download_tile(
 
                 total = int(response.headers.get("content-length", 0))
 
-                with (
-                    open(output_file, "wb") as f,
-                    tqdm(
-                        total=total, unit="B", unit_scale=True, desc=tile_name
-                    ) as pbar,
-                ):
-                    for chunk in response.iter_bytes(chunk_size=8192):
-                        f.write(chunk)
-                        pbar.update(len(chunk))
+                if extract:
+                    # Download to memory and extract
+                    buffer = BytesIO()
+                    with tqdm(
+                        total=total,
+                        unit="B",
+                        unit_scale=True,
+                        desc=f"{tile_name} (downloading)",
+                    ) as pbar:
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            buffer.write(chunk)
+                            pbar.update(len(chunk))
+
+                    # Extract zip contents
+                    buffer.seek(0)
+                    with ZipFile(buffer) as zf:
+                        print(f"Extracting {tile_name}...")
+                        zf.extractall(product_dir)
+                else:
+                    # Download and save zip file
+                    output_file = product_dir / f"{tile_name}.zip"
+                    with (
+                        open(output_file, "wb") as f,
+                        tqdm(
+                            total=total,
+                            unit="B",
+                            unit_scale=True,
+                            desc=tile_name,
+                        ) as pbar,
+                    ):
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            f.write(chunk)
+                            pbar.update(len(chunk))
 
         return True
 
@@ -245,6 +278,11 @@ def main():
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Verbose output"
+    )
+    parser.add_argument(
+        "--extract",
+        action="store_true",
+        help="Extract zip files instead of saving them (extracts in memory)",
     )
 
     args = parser.parse_args()
@@ -351,6 +389,7 @@ def main():
             tile_info["resolution"],
             tile_info["product"],
             dry_run=args.dry_run,
+            extract=args.extract,
         )
 
         if success:
