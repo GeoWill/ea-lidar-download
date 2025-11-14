@@ -153,3 +153,18 @@ Where:
 - `national_lidar_programme_point_cloud` - National LIDAR Programme point cloud
 
 Use `--list-products` to see exactly what's available for your specific area.
+
+## EC2 Automation
+
+For downloading large datasets or when you have limited local bandwidth, see the [`aws/`](aws/) directory for scripts that run downloads on AWS EC2 and sync results directly to S3.
+
+Quick example:
+```bash
+uv run python aws/ec2-download.py my_study_area.shp \
+  --s3-output s3://my-bucket/lidar-data \
+  --repo-url https://github.com/username/ea-lidar-download.git
+```
+
+SSH keys are automatically created if they don't exist.
+
+See [`aws/README.md`](aws/README.md) for full documentation.
