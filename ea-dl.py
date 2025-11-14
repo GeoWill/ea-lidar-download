@@ -145,7 +145,11 @@ def download_tile(
     if 'subscription-key' not in url:
         url = f'{url}?subscription-key=public'
 
-    output_file = output_dir / f'{tile_name}_{year}_{resolution}m_{product}.zip'
+    # Create directory structure: product/year/resolution/
+    product_dir = output_dir / product / year / f'{resolution}m'
+    product_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = product_dir / f'{tile_name}.zip'
 
     if dry_run:
         print(f'Would download: {url}')
