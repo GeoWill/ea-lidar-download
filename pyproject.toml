@@ -10,3 +10,21 @@ dependencies = [
     "shapely>=2.0.0",
     "tqdm>=4.66.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.5",
+]
+
+[tool.ruff]
+line-length = 80
+
+[tool.ruff.lint]
+ignore = ["E501"]
+extend-select = [
+    "I",
+    "C4",
+    "SIM",
+    "Q003",
+    "RET",
+]
