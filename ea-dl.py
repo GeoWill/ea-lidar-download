@@ -45,26 +45,28 @@ def get_os_grid_tiles(aoi_gdf: gp.GeoDataFrame, grid_path: str) -> gp.GeoDataFra
     return intersecting_tiles
 
 
-def query_available_products(aoi_gdf: gp.GeoDataFrame) -> List[dict]:
+def query_available_products(aoi_gdf: gp.GeoDataFrame, use_full_aoi: bool = False) -> List[dict]:
     """
     Query the API to find all available products for the AOI.
 
     Args:
         aoi_gdf: GeoDataFrame containing the area of interest
+        use_full_aoi: If True, use the full AOI geometry. If False, use a small sample.
 
     Returns:
-        List of product information dictionaries
+        List of product information dictionaries with tile URIs
     """
     # Convert AOI to WGS84 (EPSG:4326) for the API
     aoi_wgs84 = aoi_gdf.to_crs('EPSG:4326')
 
-    # Get a small representative geometry from the AOI
-    # Take the centroid and buffer it slightly to create a small polygon
-    centroid = aoi_wgs84.union_all().centroid
-    small_poly = centroid.buffer(0.001)  # Small buffer in degrees
-
-    # Convert to GeoJSON format
-    geom = mapping(small_poly)
+    if use_full_aoi:
+        # Use the full AOI to get all available tiles
+        geom = mapping(aoi_wgs84.union_all())
+    else:
+        # Get a small representative geometry from the AOI for listing products
+        centroid = aoi_wgs84.union_all().centroid
+        small_poly = centroid.buffer(0.001)  # Small buffer in degrees
+        geom = mapping(small_poly)
 
     url = 'https://environment.data.gov.uk/backend/catalog/api/tiles/collections/survey/search'
 
@@ -117,17 +119,19 @@ def organize_products(results: List[dict]) -> Dict[str, Dict]:
 
 def download_tile(
     tile_name: str,
+    url: str,
     output_dir: Path,
-    year: str = '2022',
-    resolution: str = '1',
-    product: str = 'lidar_composite_dtm',
+    year: str,
+    resolution: str,
+    product: str,
     dry_run: bool = False
 ) -> bool:
     """
-    Download a single LIDAR tile.
+    Download a single LIDAR tile from a given URL.
 
     Args:
-        tile_name: OS grid tile name (e.g., 'SU0045')
+        tile_name: OS grid tile name (e.g., 'ST8520')
+        url: Full URL to download the tile from (from API search results)
         output_dir: Directory to save downloaded files
         year: Year of data
         resolution: Resolution in meters
@@ -137,13 +141,11 @@ def download_tile(
     Returns:
         True if successful, False otherwise
     """
-    url = (
-        f'https://api.agrimetrics.co.uk/tiles/collections/survey/'
-        f'{product}/{year}/{resolution}/{tile_name}'
-        f'?subscription-key=public'
-    )
+    # Add subscription key if not present
+    if 'subscription-key' not in url:
+        url = f'{url}?subscription-key=public'
 
-    output_file = output_dir / f'{tile_name}_{year}_{resolution}m_{product}.tif'
+    output_file = output_dir / f'{tile_name}_{year}_{resolution}m_{product}.zip'
 
     if dry_run:
         print(f'Would download: {url}')
@@ -211,8 +213,8 @@ def main():
     parser.add_argument(
         '--year',
         type=str,
-        default='2022',
-        help='Year of LIDAR data (default: 2022)'
+        required=True,
+        help='Year of LIDAR data (use --list-products to see available years)'
     )
     parser.add_argument(
         '--resolution',
@@ -296,66 +298,62 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check grid file exists
-    grid_path = Path(args.grid)
-    if not grid_path.exists():
-        print(f'Error: Grid file not found at {grid_path}')
+    # Query API for available tiles
+    print('Querying API for available tiles in AOI...')
+    results = query_available_products(aoi_gdf, use_full_aoi=True)
+
+    if not results:
+        print('No tiles found for this AOI')
         sys.exit(1)
 
-    # Find intersecting grid tiles
-    if args.verbose:
-        print('Finding intersecting OS grid tiles...')
+    # Filter results by requested products, year, and resolution
+    tiles_to_download = []
+    for result in results:
+        product_id = result['product']['id']
+        year_id = result['year']['id']
+        resolution_id = result['resolution']['id']
 
-    intersecting_tiles = get_os_grid_tiles(aoi_gdf, str(grid_path))
+        if product_id in product_list and year_id == args.year and resolution_id == args.resolution:
+            tiles_to_download.append({
+                'tile_name': result['tile']['id'],
+                'url': result['uri'],
+                'product': product_id,
+                'year': year_id,
+                'resolution': resolution_id
+            })
 
-    if len(intersecting_tiles) == 0:
-        print('No intersecting tiles found')
-        sys.exit(0)
-
-    print(f'Found {len(intersecting_tiles)} intersecting tiles')
-
-    # Get tile names - check for common column names
-    tile_name_col = None
-    for col in ['TILE_NAME', 'tile_name', 'PLAN_NO', 'name', 'Name', 'NAME']:
-        if col in intersecting_tiles.columns:
-            tile_name_col = col
-            break
-
-    if tile_name_col is None:
-        print('Error: Could not find tile name column in grid file')
-        print(f'Available columns: {list(intersecting_tiles.columns)}')
+    if not tiles_to_download:
+        print(f'No tiles found matching products={product_list}, year={args.year}, resolution={args.resolution}')
+        print('\nUse --list-products to see what is available for this AOI')
         sys.exit(1)
 
-    tile_names = intersecting_tiles[tile_name_col].tolist()
+    print(f'Found {len(tiles_to_download)} tiles to download')
 
     if args.verbose:
-        print(f'Tiles to download: {", ".join(tile_names)}')
+        tile_names = sorted(set(t['tile_name'] for t in tiles_to_download))
+        print(f'Tiles: {", ".join(tile_names)}')
 
-    print(f'Products to download: {", ".join(product_list)}')
-
-    # Download each tile for each product
+    # Download each tile
     successful = 0
     failed = 0
-    total = len(tile_names) * len(product_list)
 
-    for product in product_list:
-        print(f'\nDownloading {product}...')
-        for tile_name in tile_names:
-            success = download_tile(
-                tile_name,
-                output_dir,
-                year=args.year,
-                resolution=args.resolution,
-                product=product,
-                dry_run=args.dry_run
-            )
+    for tile_info in tiles_to_download:
+        success = download_tile(
+            tile_info['tile_name'],
+            tile_info['url'],
+            output_dir,
+            tile_info['year'],
+            tile_info['resolution'],
+            tile_info['product'],
+            dry_run=args.dry_run
+        )
 
-            if success:
-                successful += 1
-            else:
-                failed += 1
+        if success:
+            successful += 1
+        else:
+            failed += 1
 
-    print(f'\nComplete: {successful}/{total} successful, {failed}/{total} failed')
+    print(f'\nComplete: {successful}/{len(tiles_to_download)} successful, {failed}/{len(tiles_to_download)} failed')
 
     if not args.dry_run:
         print(f'Files saved to: {output_dir.absolute()}')
